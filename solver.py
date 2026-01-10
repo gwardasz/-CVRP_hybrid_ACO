@@ -54,35 +54,31 @@ class MMASSolver:
             for _ in range(self.n_ants):
                 ant = Ant(self.dist_matrix, self.demands, self.capacity, 
                           self.alpha, self.beta)
-                ant.construct_route(self.pheromones)
-                
-                    
-                if self.use_local_search:
-                    # --- PHASE 3: LOCAL SEARCH INTEGRATION ---
-                    # optimize_solution returns (new_path, new_cost)
-                    improved_tour, improved_cost = ls_engine.optimize_solution(ant.tour)
-                
-                    # Update the ant with the optimized result
-                    # Convert back to NumPy array (int32) to match Numba's expected type
-                    ant.tour = np.array(improved_tour, dtype=np.int32)
-                    ant.total_cost = improved_cost
-                
-                
+                ant.construct_route(self.pheromones)                
                 ants.append(ant)
             
-            # 2. Find Iteration Best
-            # Sort ants by cost to find the best one in this batch
+            # 2. Sort to find the "Raw" Best Ant
             ants.sort(key=lambda x: x.total_cost)
             best_ant_iter = ants[0]
+
+            # --- OPTIMIZATION: ELITIST STRATEGY ---
+            # Only run heavy Local Search on the winner!
+            if self.use_local_search:
+                improved_tour, improved_cost = ls_engine.optimize_solution(best_ant_iter.tour)
+                
+                # Update the ant with the optimized result
+                best_ant_iter.tour = np.array(improved_tour, dtype=np.int32)
+                best_ant_iter.total_cost = improved_cost
+            # ---------------------------------------
             
-            # 3. Update Global Best
+            # 3. Update Global Best (Check if the optimized ant beats the record)
             if best_ant_iter.total_cost < self.best_global_cost:
                 self.best_global_cost = best_ant_iter.total_cost
                 self.best_global_solution = best_ant_iter.tour.copy()
                 
                 #print(f"Iter {iteration+1}: New Best Found! Cost = {self.best_global_cost:.2f}")
                 
-                # Dynamic Update of MMAS Limits (Optional but recommended)
+                # Dynamic MMAS Limits
                 # tau_max is often set to 1 / (rho * best_global_cost)
                 self.tau_max = 1.0 / (self.rho * self.best_global_cost)
                 self.tau_min = self.tau_max / 200.0 # Heuristic ratio
