@@ -1,8 +1,15 @@
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
 import numpy as np
 from ant import Ant
+from local_search import LocalSearch
+
 
 class MMASSolver:
-    def __init__(self, problem_instance, n_ants=20, rho=0.02, alpha=1.0, beta=2.5):
+    def __init__(self, problem_instance, n_ants=50, rho=0.2, alpha=1.0, beta=2.8, use_local_search=True):
         """
         Initializes the Max-Min Ant System Solver.
         """
@@ -15,6 +22,7 @@ class MMASSolver:
         self.rho = rho       # Evaporation rate
         self.alpha = alpha   # Pheromone importance
         self.beta = beta     # Heuristic importance
+        self.use_local_search = use_local_search
         
         # MMAS Specific Parameters [cite: 12]
         # These will be dynamically adjusted or set based on the first solution
@@ -28,10 +36,19 @@ class MMASSolver:
         self.best_global_solution = []
         self.best_global_cost = float('inf')
 
-    def solve(self, max_iterations=100):
+    def solve(self, max_iterations=100, verbose=True):
         #print(f"Starting MMAS Optimization for {max_iterations} iterations... ({self.n_ants} ants)")
         
-        for iteration in range(max_iterations):
+        # Initialize Local Search engine
+        ls_engine = LocalSearch(self.dist_matrix, self.demands, self.capacity)
+
+        # 1. Setup Progress Bar (only if verbose=True and tqdm is installed)
+        if verbose and HAS_TQDM:
+            iterator = tqdm(range(max_iterations), desc="MMAS Progress", unit="iter")
+        else:
+            iterator = range(max_iterations)
+
+        for iteration in iterator:
             # 1. Construction Phase
             ants = []
             for _ in range(self.n_ants):
@@ -39,8 +56,17 @@ class MMASSolver:
                           self.alpha, self.beta)
                 ant.construct_route(self.pheromones)
                 
-                # Phase 3 Hook: Local Search will be applied here later
-                # ant.apply_local_search() 
+                    
+                if self.use_local_search:
+                    # --- PHASE 3: LOCAL SEARCH INTEGRATION ---
+                    # optimize_solution returns (new_path, new_cost)
+                    improved_tour, improved_cost = ls_engine.optimize_solution(ant.tour)
+                
+                    # Update the ant with the optimized result
+                    # Convert back to NumPy array (int32) to match Numba's expected type
+                    ant.tour = np.array(improved_tour, dtype=np.int32)
+                    ant.total_cost = improved_cost
+                
                 
                 ants.append(ant)
             
@@ -52,13 +78,17 @@ class MMASSolver:
             # 3. Update Global Best
             if best_ant_iter.total_cost < self.best_global_cost:
                 self.best_global_cost = best_ant_iter.total_cost
-                self.best_global_solution = best_ant_iter.tour
+                self.best_global_solution = best_ant_iter.tour.copy()
+                
                 #print(f"Iter {iteration+1}: New Best Found! Cost = {self.best_global_cost:.2f}")
                 
                 # Dynamic Update of MMAS Limits (Optional but recommended)
                 # tau_max is often set to 1 / (rho * best_global_cost)
                 self.tau_max = 1.0 / (self.rho * self.best_global_cost)
                 self.tau_min = self.tau_max / 200.0 # Heuristic ratio
+                # UPDATE PROGRESS BAR with new best score
+                if verbose and HAS_TQDM:
+                    iterator.set_postfix({"Best Cost": f"{self.best_global_cost:.2f}"})
                 
             # 4. Pheromone Update (MMAS Logic)
             self._update_pheromones(best_ant_iter)

@@ -1,127 +1,293 @@
 import numpy as np
 
 class LocalSearch:
-    def __init__(self, dist_matrix):
+    def __init__(self, dist_matrix, demands, capacity):
+        """
+        Initialized with problem constraints to ensure valid moves.
+        """
         self.dist_matrix = dist_matrix
+        self.demands = demands
+        self.capacity = capacity
 
     def optimize_solution(self, full_tour):
         """
-        Parses the full ACO tour (with multiple 0s), optimizes each sub-route
-        using 2-Opt, and returns the improved full tour and new cost.
+        VND Main Loop:
+        1. Relocate -> 2. Swap -> 3. 2-Opt (Intra) -> 4. 2-Opt* (Inter)
+        Repeats until no operator can find an improvement.
         """
-        # 1. Split full tour into individual vehicle routes
+        # 1. Parse flat tour into separate routes: [[1,2], [3,4], ...]
         routes = self._extract_routes(full_tour)
         
-        improved_routes = []
+        improvement = True
+        while improvement:
+            improvement = False
+            
+            # --- Operator 1: Relocate (Move customer to different route) ---
+            # [cite: 1390]
+            if self._relocate_move(routes):
+                improvement = True
+                continue # Restart VND from top
+                
+            # --- Operator 2: Swap (Exchange customers between routes) ---
+            # [cite: 1392]
+            if self._swap_move(routes):
+                improvement = True
+                continue # Restart VND from top
+                
+            # --- Operator 3: 2-Opt (Intra-route uncrossing) ---
+            # [cite: 1399]
+            if self._two_opt_intra(routes):
+                improvement = True
+                continue
+                
+            # --- Operator 4: 2-Opt* (Inter-route tail swap) ---
+            # 
+            if self._two_opt_star(routes):
+                improvement = True
+                continue
+
+        # 2. Reconstruct flat tour
+        final_tour = [0]
         total_cost = 0.0
         
-        # 2. Apply 2-Opt to each route independently
-        for route in routes:
-            optimized_route = self._two_opt(route)
-            improved_routes.append(optimized_route)
-            
-            # Calculate cost for this segment
-            # Ensure we account for return to depot distance
-            route_cost = self._calculate_route_cost(optimized_route)
-            total_cost += route_cost
-
-        # 3. Reconstruct the full flattened tour
-        # Start with Depot (0)
-        final_tour = [0]
-        for r in improved_routes:
-            # Append route elements + return to depot
+        for r in routes:
+            if not r: continue # Skip empty routes
             final_tour.extend(r)
             final_tour.append(0)
+            total_cost += self._calculate_route_cost(r)
             
         return final_tour, total_cost
 
-    def _two_opt(self, route):
-        """
-        Standard Best-Improvement 2-Opt for a single route.
-        Route input format: [1, 5, 2] (No depots included in this list)
-        """
-        best_route = route[:]
-        improved = True
+    # =========================================================================
+    #  OPERATOR 1: RELOCATE (Move 1 node)
+    # =========================================================================
+    def _relocate_move(self, routes):
+        best_gain = 0
+        move = None
         
-        # We need the depot logic for distance calculation, 
-        # so we temporarily prepend/append 0 for the math
-        # but we only swap the inner customers.
-        
-        while improved:
-            improved = False
-            # Check every pair of edges (i, i+1) and (j, j+1)
-            # Route indices: 0 to len(route)
-            n = len(best_route)
-            
-            # We treat the route as 0 -> node -> ... -> node -> 0
-            # To simplify, let's work with the raw indices of the customer list
-            for i in range(n - 1):
-                for j in range(i + 1, n):
-                    if j - i == 1: continue # Adjacent edges, no change
+        # Iterate all routes and nodes
+        for r_idx_src, src_route in enumerate(routes):
+            for i in range(len(src_route)):
+                node = src_route[i]
+                load = self.demands[node]
+                
+                # Try inserting into every other route
+                for r_idx_dst, dst_route in enumerate(routes):
+                    if r_idx_src == r_idx_dst: continue # Simple inter-route only
                     
-                    # Calculate cost change if we reverse segment [i+1...j]
-                    if self._check_improvement(best_route, i, j):
-                        # Perform the swap (reverse the segment)
-                        best_route[i+1 : j+1] = best_route[i+1 : j+1][::-1]
-                        improved = True
+                    # Capacity Check
+                    if self._get_route_load(dst_route) + load > self.capacity:
+                        continue
+                        
+                    # Try all positions in dest route
+                    # 0 to len because we can insert at end
+                    for j in range(len(dst_route) + 1):
+                        gain = self._calc_relocate_gain(src_route, dst_route, i, j)
+                        if gain > best_gain:
+                            best_gain = gain
+                            move = (r_idx_src, r_idx_dst, i, j)
         
-        return best_route
+        if move:
+            r_src, r_dst, i, j = move
+            node = routes[r_src].pop(i)
+            routes[r_dst].insert(j, node)
+            return True
+        return False
 
-    def _check_improvement(self, route, i, j):
-        """
-        Checks if swapping edges (i, i+1) and (j, j+1) reduces length.
-        Note: We must handle the implicit depot connections at start/end.
-        """
-        # This helper is simplified. In a real efficient implementation,
-        # you calculate delta only for the broken edges.
+    def _calc_relocate_gain(self, r_src, r_dst, i, j):
+        # Cost removed from Src
+        A = r_src[i-1] if i > 0 else 0
+        B = r_src[i]
+        C = r_src[i+1] if i < len(r_src)-1 else 0
+        removed = self.dist_matrix[A][B] + self.dist_matrix[B][C] - self.dist_matrix[A][C]
         
-        # Construct current full path for these 4 points
-        A = route[i]
-        B = route[i+1]
-        C = route[j]
-        D = route[j+1] if j+1 < len(route) else -1 # -1 implies boundary handling
+        # Cost added to Dst
+        F = r_dst[j-1] if j > 0 else 0
+        G = r_dst[j] if j < len(r_dst) else 0 # 0 if inserting at end
+        added = self.dist_matrix[F][B] + self.dist_matrix[B][G] - self.dist_matrix[F][G]
         
-        # For simplicity in this snippets, calculating full path delta is safer
-        # but slower. Let's do the standard Delta check:
-        # Distance(A, B) + Distance(C, D)  vs  Distance(A, C) + Distance(B, D)
-        
-        # NOTE: Handling the depot boundaries correctly in 2-opt is tricky. 
-        # A robust way is to construct the actual path with 0s for calculation:
-        temp_route = [0] + route + [0]
-        # Adjust indices because of the prepended 0
-        idx_i = i + 1
-        idx_j = j + 1
-        
-        A = temp_route[idx_i]
-        B = temp_route[idx_i+1]
-        C = temp_route[idx_j]
-        D = temp_route[idx_j+1]
-        
-        current_dist = self.dist_matrix[A][B] + self.dist_matrix[C][D]
-        new_dist = self.dist_matrix[A][C] + self.dist_matrix[B][D]
-        
-        return new_dist < current_dist
+        return removed - added
 
+    # =========================================================================
+    #  OPERATOR 2: SWAP (Exchange 1-1)
+    # =========================================================================
+    def _swap_move(self, routes):
+        best_gain = 0
+        move = None
+        
+        for r1_idx in range(len(routes)):
+            for r2_idx in range(r1_idx + 1, len(routes)): # Avoid duplicates
+                r1 = routes[r1_idx]
+                r2 = routes[r2_idx]
+                
+                load1 = self._get_route_load(r1)
+                load2 = self._get_route_load(r2)
+                
+                for i in range(len(r1)):
+                    for j in range(len(r2)):
+                        node1 = r1[i]
+                        node2 = r2[j]
+                        
+                        # Capacity Check: New loads must be valid
+                        new_load1 = load1 - self.demands[node1] + self.demands[node2]
+                        new_load2 = load2 - self.demands[node2] + self.demands[node1]
+                        
+                        if new_load1 > self.capacity or new_load2 > self.capacity:
+                            continue
+                            
+                        gain = self._calc_swap_gain(r1, r2, i, j)
+                        if gain > best_gain:
+                            best_gain = gain
+                            move = (r1_idx, r2_idx, i, j)
+                            
+        if move:
+            r1, r2, i, j = move
+            # Swap
+            routes[r1][i], routes[r2][j] = routes[r2][j], routes[r1][i]
+            return True
+        return False
+
+    def _calc_swap_gain(self, r1, r2, i, j):
+        # Neighbors of Node 1
+        A = r1[i-1] if i > 0 else 0
+        B = r1[i]
+        C = r1[i+1] if i < len(r1)-1 else 0
+        
+        # Neighbors of Node 2
+        U = r2[j-1] if j > 0 else 0
+        V = r2[j]
+        W = r2[j+1] if j < len(r2)-1 else 0
+        
+        # Old Edges Cost
+        old_cost = (self.dist_matrix[A][B] + self.dist_matrix[B][C] +
+                    self.dist_matrix[U][V] + self.dist_matrix[V][W])
+        
+        # New Edges Cost (B is now at V's spot, V is at B's spot)
+        new_cost = (self.dist_matrix[A][V] + self.dist_matrix[V][C] +
+                    self.dist_matrix[U][B] + self.dist_matrix[B][W])
+                    
+        return old_cost - new_cost
+
+    # =========================================================================
+    #  OPERATOR 3: 2-OPT (Intra-Route)
+    # =========================================================================
+    def _two_opt_intra(self, routes):
+        # This is your existing logic, applied to each route
+        improvement_found = False
+        for route in routes:
+            if len(route) < 2: continue
+            
+            # Simple First-Improvement for speed
+            improved = True
+            while improved:
+                improved = False
+                for i in range(len(route) - 1):
+                    for j in range(i + 1, len(route)):
+                        if j - i == 1: continue 
+                        
+                        # Check gain
+                        A = route[i-1] if i > 0 else 0
+                        B = route[i]
+                        C = route[j]
+                        D = route[j+1] if j < len(route)-1 else 0
+                        
+                        curr_dist = self.dist_matrix[A][B] + self.dist_matrix[C][D]
+                        new_dist = self.dist_matrix[A][C] + self.dist_matrix[B][D]
+                        
+                        if new_dist < curr_dist:
+                            route[i:j+1] = route[i:j+1][::-1]
+                            improved = True
+                            improvement_found = True
+        return improvement_found
+
+    # =========================================================================
+    #  OPERATOR 4: 2-OPT* (Inter-Route Tail Swap)
+    # =========================================================================
+    def _two_opt_star(self, routes):
+        """
+        Cuts two routes and swaps their tails.
+        Route 1: Start -> i -> (tail1)
+        Route 2: Start -> j -> (tail2)
+        Result 1: Start -> i -> (tail2)
+        Result 2: Start -> j -> (tail1)
+        """
+        best_gain = 0
+        move = None
+        
+        for r1_idx in range(len(routes)):
+            for r2_idx in range(r1_idx + 1, len(routes)):
+                r1 = routes[r1_idx]
+                r2 = routes[r2_idx]
+                
+                # Try all break points
+                # i is last node of first part of r1
+                # j is last node of first part of r2
+                for i in range(len(r1)):
+                    for j in range(len(r2)):
+                        # Load of HEAD parts
+                        load1_head = sum(self.demands[n] for n in r1[:i+1])
+                        load2_head = sum(self.demands[n] for n in r2[:j+1])
+                        
+                        # Load of TAIL parts
+                        load1_tail = sum(self.demands[n] for n in r1[i+1:])
+                        load2_tail = sum(self.demands[n] for n in r2[j+1:])
+                        
+                        # Check Swapped Capacities
+                        if (load1_head + load2_tail > self.capacity) or \
+                           (load2_head + load1_tail > self.capacity):
+                            continue
+                            
+                        # Calculate Gain
+                        A = r1[i]
+                        B = r1[i+1] if i < len(r1)-1 else 0
+                        C = r2[j]
+                        D = r2[j+1] if j < len(r2)-1 else 0
+                        
+                        old_cost = self.dist_matrix[A][B] + self.dist_matrix[C][D]
+                        new_cost = self.dist_matrix[A][D] + self.dist_matrix[C][B]
+                        
+                        gain = old_cost - new_cost
+                        
+                        if gain > best_gain:
+                            best_gain = gain
+                            move = (r1_idx, r2_idx, i, j)
+                            
+        if move:
+            r1_idx, r2_idx, i, j = move
+            r1 = routes[r1_idx]
+            r2 = routes[r2_idx]
+            
+            # Create new routes
+            new_r1 = r1[:i+1] + r2[j+1:]
+            new_r2 = r2[:j+1] + r1[i+1:]
+            
+            routes[r1_idx] = new_r1
+            routes[r2_idx] = new_r2
+            return True
+        return False
+
+    # --- Helpers ---
     def _extract_routes(self, tour):
-        """Splits [0, 1, 2, 0, 3, 4, 0] into [[1,2], [3,4]]"""
         routes = []
-        current_route = []
+        curr = []
         for node in tour:
             if node == 0:
-                if current_route:
-                    routes.append(current_route)
-                    current_route = []
+                if curr:
+                    routes.append(curr)
+                    curr = []
             else:
-                current_route.append(node)
-        if current_route:
-            routes.append(current_route)
+                curr.append(node)
+        if curr: routes.append(curr)
         return routes
+
+    def _get_route_load(self, route):
+        return sum(self.demands[n] for n in route)
 
     def _calculate_route_cost(self, route):
         cost = 0
-        prev = 0 # Start at depot
+        prev = 0
         for node in route:
             cost += self.dist_matrix[prev][node]
             prev = node
-        cost += self.dist_matrix[prev][0] # Return to depot
+        cost += self.dist_matrix[prev][0]
         return cost

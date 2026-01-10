@@ -58,7 +58,7 @@ def run_study(fixed_n_ants):
             )
             
             # Run solver (Pruning disabled)
-            final_cost, _ = solver.solve(max_iterations=TUNING_ITERATIONS)
+            final_cost, _ = solver.solve(max_iterations=TUNING_ITERATIONS, verbose=False)
             costs.append(final_cost)
 
         # 3. Return the Mean Cost
