@@ -1,33 +1,109 @@
 import optuna
+import numpy as np
+import sys
+import time
+
+# --- IMPORTS ---
 from cvrp_data import CVRPInstance
 from solver import MMASSolver
 
-def objective(trial):
-    # 1. Define the search space
-    alpha = trial.suggest_float("alpha", 0.5, 5.0)
-    beta = trial.suggest_float("beta", 1.0, 8.0)
-    rho = trial.suggest_float("rho", 0.01, 0.2) # MMAS likes low rho
-    n_ants = trial.suggest_categorical("n_ants", [20, 30, 50])
+# --- CONFIGURATION ---
+INSTANCE_FILENAME = "E-n51-k5.vrp"
 
-    # 2. Setup the problem (Use a moderate sized instance like cmt01)
-    # Note: Loading the file inside the loop is slow; load it globally if possible
-    instance = CVRPInstance("E-n51-k5.vrp") 
+# OPTUNA SETTINGS
+N_TRIALS = 50           # Total parameter combinations to test per study
+REPEATS_PER_TRIAL = 20  # How many times to run EACH combination
+TUNING_ITERATIONS = 100 # Run shorter simulations for tuning
 
-    # 3. Run the Solver with these parameters
-    # Reduce iterations for tuning to save time (e.g., 50 or 100)
-    solver = MMASSolver(instance, n_ants=n_ants, rho=rho, alpha=alpha, beta=beta)
-    cost, _ = solver.solve(max_iterations=500) 
+# --- LOAD DATA (Global) ---
+print(f"Loading dataset: {INSTANCE_FILENAME}...")
+try:
+    GLOBAL_INSTANCE = CVRPInstance(INSTANCE_FILENAME)
+    print(f"Successfully loaded {GLOBAL_INSTANCE.name} with {GLOBAL_INSTANCE.n_locations} nodes.")
+except FileNotFoundError:
+    print(f"ERROR: Could not find file '{INSTANCE_FILENAME}'.")
+    sys.exit(1)
+
+def run_study(fixed_n_ants):
+    """
+    Runs a complete Optuna study for a fixed number of ants.
+    """
     
-    return cost
+    def objective(trial):
+        """
+        Optimization Objective: Minimize the MEAN cost over 20 stochastic runs.
+        """
+        # 1. Suggest Hyperparameters
+        # Note: n_ants is NOT suggested here, it is fixed from the parent function
+        
+        # Alpha (Pheromone Importance): Range [0.5, 5.0]
+        alpha = trial.suggest_float("alpha", 0.5, 5.0)      
+
+        # Beta (Heuristic Importance): Range [1.0, 6.0]
+        beta = trial.suggest_float("beta", 1.0, 6.0)        
+
+        # Rho (Evaporation Rate): Range [0.005, 0.2] (Low for MMAS)
+        rho = trial.suggest_float("rho", 0.005, 0.2)         
+
+        # 2. Evaluation Loop (Stochastic Averaging)
+        costs = []
+        
+        for i in range(REPEATS_PER_TRIAL):
+            solver = MMASSolver(
+                GLOBAL_INSTANCE,
+                n_ants=fixed_n_ants, # USE THE FIXED VALUE
+                rho=rho,
+                alpha=alpha,
+                beta=beta
+            )
+            
+            # Run solver (Pruning disabled)
+            final_cost, _ = solver.solve(max_iterations=TUNING_ITERATIONS)
+            costs.append(final_cost)
+
+        # 3. Return the Mean Cost
+        return np.mean(costs)
+
+    # --- Run the Study ---
+    print("\n" + "="*60)
+    print(f" STARTING OPTIMIZATION FOR N_ANTS = {fixed_n_ants}")
+    print("="*60)
+    
+    study = optuna.create_study(direction="minimize")
+    
+    try:
+        study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1)
+    except KeyboardInterrupt:
+        print("\nTuning interrupted! Saving current best...")
+
+    return study
 
 if __name__ == "__main__":
-    # Create a study object and optimize the objective function
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=50) # Run 50 different experiments
-
-    print("Best params found:")
-    print(study.best_params)
+    start_time = time.time()
     
-    # Optional: Visualize the search
-    # optuna.visualization.plot_optimization_history(study).show()
-    # optuna.visualization.plot_param_importances(study).show()
+    # --- STUDY 1: 25 ANTS ---
+    study_25 = run_study(25)
+    
+    # --- STUDY 2: 50 ANTS ---
+    study_50 = run_study(50)
+
+    # --- FINAL REPORT ---
+    elapsed = time.time() - start_time
+    print("\n" + "#"*60)
+    print(" ALL TUNING COMPLETE")
+    print("#"*60)
+    print(f"Total Time: {elapsed/60:.2f} minutes")
+
+    print("\n--- RESULTS FOR 25 ANTS ---")
+    print(f"Best Mean Cost: {study_25.best_value:.2f}")
+    print("Recommended Parameters:")
+    for key, value in study_25.best_params.items():
+        print(f"  {key} = {value}")
+    print(f"  n_ants = 25 (Fixed)")
+
+    print("\n--- RESULTS FOR 50 ANTS ---")
+    print(f"Best Mean Cost: {study_50.best_value:.2f}")
+    print("Recommended Parameters:")
+    for key, value in study_50.best_params.items():
+        print(f"  {key} = {value}")
+    print(f"  n_ants = 50 (Fixed)")

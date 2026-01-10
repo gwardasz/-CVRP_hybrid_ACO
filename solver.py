@@ -29,7 +29,7 @@ class MMASSolver:
         self.best_global_cost = float('inf')
 
     def solve(self, max_iterations=100):
-        print(f"Starting MMAS Optimization for {max_iterations} iterations... ({self.n_ants} ants)")
+        #print(f"Starting MMAS Optimization for {max_iterations} iterations... ({self.n_ants} ants)")
         
         for iteration in range(max_iterations):
             # 1. Construction Phase
@@ -53,7 +53,7 @@ class MMASSolver:
             if best_ant_iter.total_cost < self.best_global_cost:
                 self.best_global_cost = best_ant_iter.total_cost
                 self.best_global_solution = best_ant_iter.tour
-                print(f"Iter {iteration+1}: New Best Found! Cost = {self.best_global_cost:.2f}")
+                #print(f"Iter {iteration+1}: New Best Found! Cost = {self.best_global_cost:.2f}")
                 
                 # Dynamic Update of MMAS Limits (Optional but recommended)
                 # tau_max is often set to 1 / (rho * best_global_cost)
