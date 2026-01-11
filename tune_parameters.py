@@ -1,109 +1,195 @@
 import optuna
 import numpy as np
 import sys
-import time
+import os
+from tqdm import tqdm  # <--- NEW: Required for progress bar
 
 # --- IMPORTS ---
 from cvrp_data import CVRPInstance
 from solver import MMASSolver
 
-# --- CONFIGURATION ---
-INSTANCE_FILENAME = "E-n51-k5.vrp"
+# =============================================================================
+#  SCIENTIFIC CONFIGURATION
+# =============================================================================
 
-# OPTUNA SETTINGS
-N_TRIALS = 50           # Total parameter combinations to test per study
-REPEATS_PER_TRIAL = 20  # How many times to run EACH combination
-TUNING_ITERATIONS = 100 # Run shorter simulations for tuning
+# 1. TUNING MODE
+# Change this to "standard" or "hybrid" to tune the respective solver.
+TUNING_MODE =  "hybrid"
+#TUNING_MODE =  "standard"
 
-# --- LOAD DATA (Global) ---
-print(f"Loading dataset: {INSTANCE_FILENAME}...")
-try:
-    GLOBAL_INSTANCE = CVRPInstance(INSTANCE_FILENAME)
-    print(f"Successfully loaded {GLOBAL_INSTANCE.name} with {GLOBAL_INSTANCE.n_locations} nodes.")
-except FileNotFoundError:
-    print(f"ERROR: Could not find file '{INSTANCE_FILENAME}'.")
-    sys.exit(1)
+# 2. TUNING SUITE (The "Mirror" Strategy)
+# We use these proxies to ensure parameters work on ALL topologies.
+TUNING_INSTANCES = {
+    "random":    {"filename": "A-n32-k5.vrp", "bks": 784},   # Small/Random
+    "clustered": {"filename": "P-n55-k7.vrp", "bks": 568},   # Clustered/Medium
+    "large":     {"filename": "A-n60-k9.vrp", "bks": 1354}   # Larger Scale
+}
 
-def run_study(fixed_n_ants):
+# 3. OPTUNA SETTINGS
+N_TRIALS = 50
+
+# --- ADAPTIVE SETTINGS BASED ON MODE ---
+if TUNING_MODE == "hybrid":
+    # Hybrid is computationally expensive (Python VND), so we reduce workload.
+    # We only need to see if the colony "learns" (Lamarckian), which happens early.
+    REPEATS_PER_TRIAL = 5   # Reduced from 10/20
+    MAX_ITERATIONS = 20     # Reduced from 100 (Critical fix)
+else:
+    # Standard mode is fast (Numba), so we can afford rigorous stats.
+    REPEATS_PER_TRIAL = 10 
+    MAX_ITERATIONS = 100
+
+# =============================================================================
+#  HELPER FUNCTIONS
+# =============================================================================
+
+def load_tuning_suite():
+    """Loads all proxy instances into memory once to save time."""
+    suite = []
+    print(f"\n[Loader] Loading Tuning Suite for {TUNING_MODE.upper()} mode...")
+    
+    for key, info in TUNING_INSTANCES.items():
+        fname = "./datasets/" + info["filename"]
+        if not os.path.exists(fname):
+            print(f"  [ERROR] File not found: {fname}")
+            print(f"  Please download it from VRPLIB (Augerat Set A/P).")
+            sys.exit(1)
+        
+        instance = CVRPInstance(fname)
+        suite.append({
+            "type": key,
+            "data": instance,
+            "bks": info["bks"]
+        })
+        print(f"  [OK] Loaded {key}: {fname} (n={instance.n_locations})")
+    
+    return suite
+
+# Global load to allow Optuna to pickle data to workers
+loaded_suite = load_tuning_suite()
+
+# =============================================================================
+#  OPTIMIZATION OBJECTIVE
+# =============================================================================
+
+def objective(trial):
     """
-    Runs a complete Optuna study for a fixed number of ants.
+    Minimizes the Weighted Average Percentage Gap to BKS.
     """
     
-    def objective(trial):
-        """
-        Optimization Objective: Minimize the MEAN cost over 20 stochastic runs.
-        """
-        # 1. Suggest Hyperparameters
-        # Note: n_ants is NOT suggested here, it is fixed from the parent function
+    # --- 1. HYPERPARAMETER SEARCH SPACE ---
+    
+    # A. Alpha (Pheromone Importance)
+    # Scientific Consensus: Keep fixed at 1.0 to reduce search noise [Stutzle 2000]
+    alpha = 1.0 
+    
+    # B. Beta (Heuristic Importance)
+    if TUNING_MODE == "hybrid":
+        # Hybrid needs LESS beta (1-3) because Local Search fixes greedy errors
+        beta = trial.suggest_float("beta", 1.0, 3.5)
+    else:
+        # Standard needs MORE beta (2-5) to guide ants correctly
+        beta = trial.suggest_float("beta", 2.0, 5.0)
+
+    # C. Rho (Evaporation Rate)
+    if TUNING_MODE == "hybrid":
+        # Hybrid needs HIGH evaporation (0.1 - 0.5) to forget Lamarckian "super-trails"
+        rho = trial.suggest_float("rho", 0.1, 0.5)
+    else:
+        # Standard needs LOW evaporation (0.01 - 0.1) to slowly build convergence
+        rho = trial.suggest_float("rho", 0.01, 0.1)
+
+    # D. Ant Factor (Scalability)
+    # Instead of "50 ants", we tune "0.5 * n_cities" vs "1.0 * n_cities"
+    ant_factor = trial.suggest_float("ant_factor", 0.5, 1.0, step=0.1)
+
+    # --- 2. EVALUATION LOOP ---
+    total_weighted_gap = 0.0
+    
+    for item in loaded_suite:
+        instance = item["data"]
+        bks = item["bks"]
+        itype = item["type"]
         
-        # Alpha (Pheromone Importance): Range [0.5, 5.0]
-        alpha = trial.suggest_float("alpha", 0.5, 5.0)      
-
-        # Beta (Heuristic Importance): Range [1.0, 6.0]
-        beta = trial.suggest_float("beta", 1.0, 6.0)        
-
-        # Rho (Evaporation Rate): Range [0.005, 0.2] (Low for MMAS)
-        rho = trial.suggest_float("rho", 0.005, 0.2)         
-
-        # 2. Evaluation Loop (Stochastic Averaging)
-        costs = []
+        # Calculate dynamic ant count
+        n_ants = max(10, int(instance.n_locations * ant_factor))
         
-        for i in range(REPEATS_PER_TRIAL):
+        # Run Repeats
+        avg_cost = 0.0
+        for _ in range(REPEATS_PER_TRIAL):
             solver = MMASSolver(
-                GLOBAL_INSTANCE,
-                n_ants=fixed_n_ants, # USE THE FIXED VALUE
+                instance,
+                n_ants=n_ants,
                 rho=rho,
                 alpha=alpha,
-                beta=beta
+                beta=beta,
+                use_local_search=(TUNING_MODE == "hybrid")
             )
+            # CRITICAL: verbose=False prevents parallel print chaos
+            cost, _ = solver.solve(max_iterations=MAX_ITERATIONS, verbose=False)
+            avg_cost += cost
             
-            # Run solver (Pruning disabled)
-            final_cost, _ = solver.solve(max_iterations=TUNING_ITERATIONS, verbose=False)
-            costs.append(final_cost)
+        avg_cost /= REPEATS_PER_TRIAL
+        
+        # Calculate Gap
+        gap = ((avg_cost - bks) / bks) * 100.0
+        
+        # WEIGHTING STRATEGY
+        # We penalize failure on "Clustered" and "Large" maps more than small ones
+        if itype == "random":
+            weight = 0.2
+        elif itype == "clustered":
+            weight = 0.4
+        else: # large
+            weight = 0.4
+            
+        total_weighted_gap += gap * weight
 
-        # 3. Return the Mean Cost
-        return np.mean(costs)
+    return total_weighted_gap
 
-    # --- Run the Study ---
+# =============================================================================
+#  MAIN EXECUTION (EXTENDED)
+# =============================================================================
+
+if __name__ == "__main__":
+    # 1. Suppress Optuna logging to avoid fighting with the progress bar
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
     print("\n" + "="*60)
-    print(f" STARTING OPTIMIZATION FOR N_ANTS = {fixed_n_ants}")
+    print(f" STARTING ROBUST TUNING PROTOCOL")
+    print(f" Mode: {TUNING_MODE.upper()}")
+    print(f" Repeats: {REPEATS_PER_TRIAL} | Parallel Jobs: ALL (-1)")
+    print(f" Objective: Minimize Weighted Gap across {len(loaded_suite)} instance types")
     print("="*60)
+    print(" Executing Trials (Progress Bar monitors completed trials)...")
     
     study = optuna.create_study(direction="minimize")
     
-    try:
-        study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1)
-    except KeyboardInterrupt:
-        print("\nTuning interrupted! Saving current best...")
+    # 2. EXTENSION: TQDM Callback for Parallel Progress
+    # This runs in the main process and updates as workers finish trials.
+    with tqdm(total=N_TRIALS, desc="Hyperparameter Tuning", unit="trial") as pbar:
+        def progress_callback(study, trial):
+            pbar.update(1)
+            pbar.set_postfix({"Best Gap": f"{study.best_value:.2f}%"})
 
-    return study
+        try:
+            # n_jobs=-1 uses all CPU cores
+            # callbacks=[progress_callback] links the bar to the parallel execution
+            study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1, callbacks=[progress_callback])
+        except KeyboardInterrupt:
+            print("\n[STOP] User interrupted tuning. Saving best so far...")
 
-if __name__ == "__main__":
-    start_time = time.time()
-    
-    # --- STUDY 1: 25 ANTS ---
-    study_25 = run_study(25)
-    
-    # --- STUDY 2: 50 ANTS ---
-    study_50 = run_study(50)
-
-    # --- FINAL REPORT ---
-    elapsed = time.time() - start_time
     print("\n" + "#"*60)
-    print(" ALL TUNING COMPLETE")
+    print(" TUNING COMPLETE")
     print("#"*60)
-    print(f"Total Time: {elapsed/60:.2f} minutes")
-
-    print("\n--- RESULTS FOR 25 ANTS ---")
-    print(f"Best Mean Cost: {study_25.best_value:.2f}")
+    print(f"Best Weighted Gap: {study.best_value:.2f}%")
     print("Recommended Parameters:")
-    for key, value in study_25.best_params.items():
+    for key, value in study.best_params.items():
         print(f"  {key} = {value}")
-    print(f"  n_ants = 25 (Fixed)")
-
-    print("\n--- RESULTS FOR 50 ANTS ---")
-    print(f"Best Mean Cost: {study_50.best_value:.2f}")
-    print("Recommended Parameters:")
-    for key, value in study_50.best_params.items():
-        print(f"  {key} = {value}")
-    print(f"  n_ants = 50 (Fixed)")
+    
+    print("\n[COPY TO MAIN.PY]")
+    print(f"PARAMS_{TUNING_MODE.upper()} = {{")
+    for key, value in study.best_params.items():
+        print(f"    '{key}': {value:.4f},")
+    print(f"    'alpha': 1.0  # Fixed")
+    print("}")

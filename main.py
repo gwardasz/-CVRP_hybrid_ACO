@@ -1,10 +1,35 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import time
+import os
 from cvrp_data import CVRPInstance
 from solver import MMASSolver
 
-# --- VISUALIZATION FUNCTIONS ---
+# =============================================================================
+#  SCIENTIFIC PARAMETER SETS (Result of Optuna Tuning)
+# =============================================================================
+
+# 1. PARAMETERS FOR PURE MMAS (Standard Mode)
+# Tuned for: Low Evaporation, High Heuristic Reliance, Higher Ant Count
+PARAMS_STANDARD = {
+    'alpha': 1.0,      # Fixed
+    'beta': 4.67,      # Higher beta because ants rely on greedy distance
+    'rho': 0.10,       # Lower rho to build history slowly
+    'ant_factor': 1.0  # Standard density: 1 ant per city
+}
+
+# 2. PARAMETERS FOR HYBRID MMAS (VND + Lamarckian)
+# Tuned for: High Evaporation, Low Heuristic Reliance, Efficient Ant Count
+PARAMS_HYBRID = {
+    'beta': 3.2444,
+    'rho': 0.2203,
+    'ant_factor': 1.0000,
+    'alpha': 1.0  # Fixed
+}
+
+# =============================================================================
+#  VISUALIZATION FUNCTIONS
+# =============================================================================
 
 def plot_comparison(instance, tour1, cost1, title1, tour2, cost2, title2):
     """
@@ -30,7 +55,11 @@ def plot_comparison(instance, tour1, cost1, title1, tour2, cost2, title2):
         if tour is not None and len(tour) > 0:
             x_seq = [coords[node][0] for node in tour]
             y_seq = [coords[node][1] for node in tour]
+            
+            # Draw Lines
             ax.plot(x_seq, y_seq, c='black', linewidth=1, alpha=0.7, linestyle='-')
+            
+            # Draw Arrows (Quiver)
             ax.quiver(x_seq[:-1], y_seq[:-1], 
                       [x_seq[j+1]-x_seq[j] for j in range(len(x_seq)-1)],
                       [y_seq[j+1]-y_seq[j] for j in range(len(y_seq)-1)], 
@@ -42,22 +71,30 @@ def plot_comparison(instance, tour1, cost1, title1, tour2, cost2, title2):
     plt.tight_layout()
     plt.show()
 
-# --- CORE LOGIC FUNCTIONS ---
+# =============================================================================
+#  CORE EXPERIMENT LOGIC
+# =============================================================================
 
 def run_single_experiment(instance, params, use_local_search, max_iters, verbose=True):
     """
-    Runs a single MMAS experiment and returns the results.
-    Returns: (cost, tour, elapsed_time)
+    Runs a single MMAS experiment with DYNAMIC SCALING.
     """
+    mode = "Hybrid (VND)" if use_local_search else "Pure MMAS"
+    
+    # --- SCIENTIFIC SCALING: CALCULATE ANTS DYNAMICALLY ---
+    # m = Round(ant_factor * N)
+    n_ants = int(round(instance.n_locations * params['ant_factor']))
+    n_ants = max(10, n_ants) # Safety floor: never less than 10
+    
     if verbose:
-        mode = "Hybrid (VND)" if use_local_search else "Pure MMAS"
         print(f"\n>>> Running {mode}...")
+        print(f"    [Config] Ants: {n_ants} (Factor: {params['ant_factor']}), Rho: {params['rho']}, Beta: {params['beta']}")
     
     t0 = time.time()
     
     solver = MMASSolver(
         instance, 
-        n_ants=params['n_ants'], 
+        n_ants=n_ants,          # Passed Dynamic Count
         rho=params['rho'], 
         alpha=params['alpha'], 
         beta=params['beta'], 
@@ -68,24 +105,6 @@ def run_single_experiment(instance, params, use_local_search, max_iters, verbose
     elapsed = time.time() - t0
     
     return cost, tour, elapsed
-
-def print_experiment_config(filename, n_nodes, max_iters, params):
-    """Prints the professional configuration header."""
-    print("\n" + "="*60)
-    print(f" EXPERIMENT CONFIGURATION: {filename}")
-    print("="*60)
-    print(f" Instance:       {filename} ({n_nodes} nodes)")
-    print(f" Max Iterations: {max_iters}")
-    print("-" * 60)
-    print(" MMAS PARAMETERS:")
-    print(f"   n_ants:       {params['n_ants']}")
-    print(f"   rho:          {params['rho']}  (Evaporation)")
-    print(f"   alpha:        {params['alpha']}   (Pheromone)")
-    print(f"   beta:         {params['beta']}  (Heuristic)")
-    print("-" * 60)
-    print(" LOCAL SEARCH (VND):")
-    print("   1. Relocate -> 2. Swap -> 3. 2-Opt -> 4. 2-Opt*")
-    print("="*60 + "\n")
 
 def print_results_table(res_pure, res_hybrid):
     """
@@ -103,7 +122,7 @@ def print_results_table(res_pure, res_hybrid):
     print(f"{'Time (seconds)':<20} | {time_pure:<15.2f} | {time_hybrid:<15.2f}")
     
     cost_imp = cost_pure - cost_hybrid
-    cost_imp_pct = (cost_imp / cost_pure) * 100
+    cost_imp_pct = (cost_imp / cost_pure) * 100 if cost_pure > 0 else 0
     
     if time_pure > 0:
         time_penalty = time_hybrid / time_pure
@@ -115,64 +134,66 @@ def print_results_table(res_pure, res_hybrid):
     print(f"Time Factor:         Hybrid is {time_penalty:.1f}x slower")
     print("="*60)
 
-# --- WRAPPER FUNCTION ---
+# =============================================================================
+#  WRAPPER & MAIN
+# =============================================================================
 
 def run_full_comparison_for_file(filename, max_iters=200):
     """
-    Wrapper function to execute the full comparison pipeline for a given dataset file.
+    Executes the full comparison pipeline using distinct, scientifically tuned parameters.
     """
     # 1. Load Data
     try:
+        if not os.path.exists(filename):
+            print(f"[Error] File not found: {filename}")
+            return
         instance = CVRPInstance(filename)
-    except FileNotFoundError:
-        print(f"Error: {filename} not found.")
+    except Exception as e:
+        print(f"[Error] Could not load {filename}: {e}")
         return
 
-    # 2. Setup Parameters (Defaults from tuning)
-    PARAMS = {
-        'n_ants': 50,
-        'rho': 0.20,
-        'alpha': 1.0,
-        'beta': 2.84
-    }
+    print("\n" + "="*60)
+    print(f" EXPERIMENT: {instance.name} (N={instance.n_locations})")
+    print("="*60)
 
-    # 3. Print Config
-    print_experiment_config(filename, instance.n_locations, max_iters, PARAMS)
-
-    # 4. Run Experiment A: Pure MMAS
+    # 2. Run Experiment A: Pure MMAS (Using Standard Parameters)
     results_pure = run_single_experiment(
-        instance, PARAMS, 
+        instance, 
+        PARAMS_STANDARD,      # <--- Uses Low Rho, High Beta
         use_local_search=False, 
         max_iters=max_iters
     )
 
-    # 5. Run Experiment B: Hybrid MMAS
+    # 3. Run Experiment B: Hybrid MMAS (Using Hybrid Parameters)
     results_hybrid = run_single_experiment(
-        instance, PARAMS, 
+        instance, 
+        PARAMS_HYBRID,        # <--- Uses High Rho, Low Beta
         use_local_search=True, 
         max_iters=max_iters
     )
 
-    # 6. Report & Visualize
+    # 4. Report & Visualize
     print_results_table(results_pure, results_hybrid)
     
     print(f"Generating Comparison Plot for {filename}...")
     plot_comparison(
         instance, 
-        results_pure[1], results_pure[0], "Pure MMAS", 
-        results_hybrid[1], results_hybrid[0], "Hybrid MMAS (VND)"
+        results_pure[1], results_pure[0], "Pure MMAS\n(Standard Physics)", 
+        results_hybrid[1], results_hybrid[0], "Hybrid MMAS\n(Lamarckian Physics)"
     )
 
-# --- MAIN EXECUTION ---
-
 def main():
-    # You can now easily run multiple files here!
+    # --- FINAL TEST SUITE ---
     
-    # Run 1: The Standard Benchmark
-    run_full_comparison_for_file("CMT4.vrp", max_iters=200)
+    # 1. Random Topology (Validation)
+    run_full_comparison_for_file("./datasets/CMT1.vrp", max_iters=200)
 
-    # Example: Run 2 (Uncomment if you have another file)
-    # run_full_comparison_for_file("A-n32-k5.vrp", max_iters=200)
+    # 2. Clustered Topology (Stability Test)
+    run_full_comparison_for_file("./datasets/CMT12.vrp", max_iters=200)
+    
+    # 3. Large Scale (Scalability Test)
+    # Ensure you have 'Golden_n201.vrp' or similar if testing scalability
+    run_full_comparison_for_file("./datasets/Golden_1.vrp", max_iters=200)
 
 if __name__ == "__main__":
     main()

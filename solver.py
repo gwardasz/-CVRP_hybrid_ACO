@@ -79,9 +79,7 @@ class MMASSolver:
                 #print(f"Iter {iteration+1}: New Best Found! Cost = {self.best_global_cost:.2f}")
                 
                 # Dynamic MMAS Limits
-                # tau_max is often set to 1 / (rho * best_global_cost)
-                self.tau_max = 1.0 / (self.rho * self.best_global_cost)
-                self.tau_min = self.tau_max / 200.0 # Heuristic ratio
+                self._update_tau_limits()
                 # UPDATE PROGRESS BAR with new best score
                 if verbose and HAS_TQDM:
                     iterator.set_postfix({"Best Cost": f"{self.best_global_cost:.2f}"})
@@ -90,6 +88,44 @@ class MMASSolver:
             self._update_pheromones(best_ant_iter)
             
         return self.best_global_cost, self.best_global_solution
+
+    def _update_tau_limits(self):
+        """
+        Recalculates tau_max and tau_min based on the new best cost found.
+        Uses the Stützle & Hoos (2000) derivation.
+        """
+        # 1. Update tau_max: 1 / (rho * best_cost)
+        if self.best_global_cost > 0:
+            self.tau_max = 1.0 / (self.rho * self.best_global_cost)
+        else:
+            self.tau_max = 1.0  # Fallback if cost is 0 or uninitialized
+
+        # 2. Update tau_min
+        # n is the number of customers (decisions to make)
+        n = len(self.demands) - 1 
+        
+        # p_best is the probability of constructing the best tour (0.05 is standard)
+        p_best = 0.05
+        
+        # avg is the average number of choices (n/2 is standard approx)
+        avg = n / 2.0
+
+        if n > 1:
+            # The Formula:
+            # tau_min = tau_max * (1 - p_best^(1/n)) / ((avg - 1) * p_best^(1/n))
+            root_p = p_best ** (1.0 / n)
+            numerator = self.tau_max * (1.0 - root_p)
+            denominator = (avg - 1.0) * root_p
+            
+            self.tau_min = numerator / denominator
+        else:
+            # Fallback for very small/trivial instances
+            self.tau_min = self.tau_max / 20.0
+
+        # 3. Safety Check: Ensure min never exceeds max
+        if self.tau_min > self.tau_max:
+            self.tau_min = self.tau_max
+
 
     def _update_pheromones(self, best_ant):
         """
