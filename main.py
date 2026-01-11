@@ -169,7 +169,7 @@ def main():
     # You can now easily run multiple files here!
     
     # Run 1: The Standard Benchmark
-    run_full_comparison_for_file("E-n51-k5.vrp", max_iters=200)
+    run_full_comparison_for_file("CMT4.vrp", max_iters=200)
 
     # Example: Run 2 (Uncomment if you have another file)
     # run_full_comparison_for_file("A-n32-k5.vrp", max_iters=200)
