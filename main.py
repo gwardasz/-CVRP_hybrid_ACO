@@ -191,9 +191,6 @@ def main():
     # 2. Clustered Topology (Stability Test)
     run_full_comparison_for_file("./datasets/CMT12.vrp", max_iters=200)
     
-    # 3. Large Scale (Scalability Test)
-    # Ensure you have 'Golden_n201.vrp' or similar if testing scalability
-    run_full_comparison_for_file("./datasets/Golden_1.vrp", max_iters=200)
 
 if __name__ == "__main__":
     main()

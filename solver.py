@@ -37,6 +37,7 @@ class MMASSolver:
         self.best_global_cost = float('inf')
 
     def solve(self, max_iterations=100, verbose=True):
+        history = []
         #print(f"Starting MMAS Optimization for {max_iterations} iterations... ({self.n_ants} ants)")
         
         # Initialize Local Search engine
@@ -77,7 +78,7 @@ class MMASSolver:
                 self.best_global_solution = best_ant_iter.tour.copy()
                 
                 #print(f"Iter {iteration+1}: New Best Found! Cost = {self.best_global_cost:.2f}")
-                
+                history.append(self.best_global_cost)
                 # Dynamic MMAS Limits
                 self._update_tau_limits()
                 # UPDATE PROGRESS BAR with new best score
@@ -87,7 +88,7 @@ class MMASSolver:
             # 4. Pheromone Update (MMAS Logic)
             self._update_pheromones(best_ant_iter)
             
-        return self.best_global_cost, self.best_global_solution
+        return self.best_global_cost, self.best_global_solution, history
 
     def _update_tau_limits(self):
         """

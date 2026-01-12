@@ -10,6 +10,7 @@ class CVRPInstance:
         self.coords = []   # List of (x, y) tuples
         self.demands = []  # List of integers
         self.dist_matrix = None
+        self.bks = None
 
         # Automatically load and process data upon initialization
         self._read_file()
@@ -35,6 +36,16 @@ class CVRPInstance:
 
             if parts[0] == "NAME":
                 self.name = parts[-1]
+            # --- NEW: Parse COMMENT for BKS ---
+            elif parts[0] == "COMMENT":
+                # CMT files format: "COMMENT : 524.61" -> parts[-1] is the value
+                try:
+                    # Remove any non-numeric characters just in case, or take last element
+                    val_str = parts[-1] 
+                    self.bks = float(val_str)
+                except ValueError:
+                    self.bks = None # Could not parse BKS
+            # ----------------------------------
             elif parts[0] == "DIMENSION":
                 self.n_locations = int(parts[-1])
             elif parts[0] == "CAPACITY":
@@ -51,15 +62,11 @@ class CVRPInstance:
             elif parts[0] == "EOF":
                 break
 
-            # Parsing sections
             if section == "COORD":
-                # Format: ID X Y
                 self.coords.append((float(parts[1]), float(parts[2])))
             elif section == "DEMAND":
-                # Format: ID Demand
                 self.demands.append(int(parts[1]))
 
-        # Convert to numpy arrays for speed
         self.demands = np.array(self.demands)
 
     def _compute_distance_matrix(self):
