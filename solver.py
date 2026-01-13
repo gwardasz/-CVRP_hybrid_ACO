@@ -37,6 +37,13 @@ class MMASSolver:
         self.best_global_cost = float('inf')
 
     def solve(self, max_iterations=100, verbose=True):
+        """
+        Executes the solver.
+        Returns: 
+            best_cost (float), 
+            best_solution (list), 
+            history (list of tuples): [(iter, cost), (iter, cost)...]
+        """
         history = []
         #print(f"Starting MMAS Optimization for {max_iterations} iterations... ({self.n_ants} ants)")
         
@@ -78,7 +85,7 @@ class MMASSolver:
                 self.best_global_solution = best_ant_iter.tour.copy()
                 
                 #print(f"Iter {iteration+1}: New Best Found! Cost = {self.best_global_cost:.2f}")
-                history.append(self.best_global_cost)
+                history.append((iteration, self.best_global_cost))
                 # Dynamic MMAS Limits
                 self._update_tau_limits()
                 # UPDATE PROGRESS BAR with new best score

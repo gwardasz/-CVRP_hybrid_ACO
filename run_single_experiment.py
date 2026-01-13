@@ -81,9 +81,14 @@ def main():
     real_bks = instance.bks if (hasattr(instance, 'bks') and instance.bks is not None) else -1.0
     
     detailed_data = []
-    convergence_data = {}
+    # REFACTOR: Initialize lists to hold history for ALL trials
+    convergence_data = {
+        'Standard': [],
+        'Hybrid': [],
+        'Meta_Max_Iters': {'Standard': MAX_ITERS_STD, 'Hybrid': MAX_ITERS_HYB}
+    }
 
-    # 3. Run Standard MMAS (200 Iterations)
+    # 3. Run Standard MMAS
     desc_std = f"Std {filename.split('.')[0]}"
     for i in tqdm(range(N_TRIALS), desc=desc_std, ncols=80):
         c, t, h = run_trial(instance, PARAMS_STANDARD, use_ls=False, max_iters=MAX_ITERS_STD)
@@ -93,11 +98,14 @@ def main():
             'Algorithm': 'Standard',
             'Cost': c, 
             'Time': t, 
-            'BKS': real_bks
+            'BKS': real_bks,
+            'Iterations': MAX_ITERS_STD,
+            'LocalSearch': False
         })
-        if i == 0: convergence_data['Standard'] = h
+        # REFACTOR: Save history for every trial
+        convergence_data['Standard'].append(h)
 
-    # 4. Run Hybrid MMAS (100 Iterations)
+    # 4. Run Hybrid MMAS
     desc_hyb = f"Hyb {filename.split('.')[0]}"
     for i in tqdm(range(N_TRIALS), desc=desc_hyb, ncols=80):
         c, t, h = run_trial(instance, PARAMS_HYBRID, use_ls=True, max_iters=MAX_ITERS_HYB)
@@ -107,20 +115,30 @@ def main():
             'Algorithm': 'Hybrid',
             'Cost': c, 
             'Time': t, 
-            'BKS': real_bks
+            'BKS': real_bks,
+            'Iterations': MAX_ITERS_HYB,
+            'LocalSearch': True
         })
-        if i == 0: convergence_data['Hybrid'] = h
+        # REFACTOR: Save history for every trial
+        convergence_data['Hybrid'].append(h)
 
-    # 5. Save Results to Unique Files
+    # 5. Save Results
     base_name = filename.replace('.vrp', '')
     csv_path = os.path.join(RESULTS_DIR, f"{base_name}_results.csv")
     json_path = os.path.join(RESULTS_DIR, f"{base_name}_convergence.json")
 
-    pd.DataFrame(detailed_data).to_csv(csv_path, index=False)
-    with open(json_path, "w") as f:
-        json.dump(convergence_data, f)
+    try:
+        pd.DataFrame(detailed_data).to_csv(csv_path, index=False)
+        print(f"\n[Success] CSV saved to: {csv_path}")
+    except Exception as e:
+        print(f"\n[Error] Failed to save CSV: {e}")
 
-    print(f"\n[Success] Saved results to: {csv_path}")
+    try:
+        with open(json_path, "w") as f:
+            json.dump(convergence_data, f)
+        print(f"[Success] JSON saved to: {json_path}")
+    except Exception as e:
+        print(f"\n[Error] Failed to save JSON: {e}")
 
 if __name__ == "__main__":
     main()

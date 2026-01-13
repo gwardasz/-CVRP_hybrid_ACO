@@ -1,40 +1,82 @@
-import matplotlib.pyplot as plt
-import numpy as np
-import time
 import os
+import time
+import json
+import argparse
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm
+from scipy.stats import wilcoxon
+
+# Import your project modules
 from cvrp_data import CVRPInstance
 from solver import MMASSolver
 
 # =============================================================================
-#  SCIENTIFIC PARAMETER SETS (Result of Optuna Tuning)
+#  CONFIGURATION (Scientifically Tuned)
 # =============================================================================
 
-# 1. PARAMETERS FOR PURE MMAS (Standard Mode)
-# Tuned for: Low Evaporation, High Heuristic Reliance, Higher Ant Count
+# Parameters from run_single_experiment.py
 PARAMS_STANDARD = {
-    'alpha': 1.0,      # Fixed
-    'beta': 4.67,      # Higher beta because ants rely on greedy distance
-    'rho': 0.10,       # Lower rho to build history slowly
-    'ant_factor': 1.0  # Standard density: 1 ant per city
+    'alpha': 1.0, 
+    'beta': 4.18,
+    'rho': 0.10,
+    'ant_factor': 1.0
 }
 
-# 2. PARAMETERS FOR HYBRID MMAS (VND + Lamarckian)
-# Tuned for: High Evaporation, Low Heuristic Reliance, Efficient Ant Count
 PARAMS_HYBRID = {
-    'beta': 3.2444,
-    'rho': 0.2203,
-    'ant_factor': 1.0000,
-    'alpha': 1.0  # Fixed
+    'alpha': 1.0,
+    'beta': 3.13,
+    'rho': 0.50,
+    'ant_factor': 1.0
 }
+
+# Execution Budgets
+MAX_ITERS_STD = 200
+MAX_ITERS_HYB = 25 
+
+# Output Directory
+RESULTS_DIR = "demo"
+PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 
 # =============================================================================
-#  VISUALIZATION FUNCTIONS
+#  CORE SOLVER WRAPPER
+# =============================================================================
+
+def run_trial_unified(instance, params, use_ls, max_iters):
+    """
+    Unified runner that returns EVERYTHING needed for both modes:
+    Cost, Time, Convergence History, and the Tour (Route).
+    """
+    n_ants = max(10, int(round(instance.n_locations * params['ant_factor'])))
+    
+    solver = MMASSolver(
+        instance, n_ants=n_ants, rho=params['rho'], 
+        alpha=params['alpha'], beta=params['beta'], use_local_search=use_ls
+    )
+    
+    t0 = time.time()
+    # Ensure solver.py returns: cost, tour, history
+    cost, tour, history = solver.solve(max_iterations=max_iters, verbose=False)
+    elapsed = time.time() - t0
+    
+    # Fix history format if needed (convert numpy types to float)
+    if history and isinstance(history[0], (tuple, list)):
+        # If tuple (iter, cost)
+        history_clean = [(int(i), float(c)) for i, c in history]
+    else:
+        # If flat list, assume index is iteration
+        history_clean = [(i, float(c)) for i, c in enumerate(history)]
+
+    return float(cost), float(elapsed), history_clean, tour
+
+# =============================================================================
+#  MODE 1: SINGLE RUN VISUALIZATION
 # =============================================================================
 
 def plot_comparison(instance, tour1, cost1, title1, tour2, cost2, title2):
-    """
-    Plots two solutions side-by-side for visual comparison.
-    """
+    """Plots two solutions side-by-side."""
     coords = instance.coords
     fig, axes = plt.subplots(1, 2, figsize=(16, 8))
     
@@ -44,7 +86,7 @@ def plot_comparison(instance, tour1, cost1, title1, tour2, cost2, title2):
     for i, ax in enumerate(axes):
         ax.set_title(titles[i], fontsize=14, fontweight='bold')
         
-        # Plot Nodes
+        # Plot Depot and Customers
         ax.scatter(coords[0][0], coords[0][1], c='red', marker='s', s=100, label='Depot', zorder=5)
         cust_x = [c[0] for c in coords[1:]]
         cust_y = [c[1] for c in coords[1:]]
@@ -59,7 +101,7 @@ def plot_comparison(instance, tour1, cost1, title1, tour2, cost2, title2):
             # Draw Lines
             ax.plot(x_seq, y_seq, c='black', linewidth=1, alpha=0.7, linestyle='-')
             
-            # Draw Arrows (Quiver)
+            # Arrows
             ax.quiver(x_seq[:-1], y_seq[:-1], 
                       [x_seq[j+1]-x_seq[j] for j in range(len(x_seq)-1)],
                       [y_seq[j+1]-y_seq[j] for j in range(len(y_seq)-1)], 
@@ -69,128 +111,228 @@ def plot_comparison(instance, tour1, cost1, title1, tour2, cost2, title2):
         ax.grid(True, linestyle='--', alpha=0.5)
 
     plt.tight_layout()
+    
+    # Optional: Save this plot to demo folder as well
+    os.makedirs(PLOTS_DIR, exist_ok=True)
+    save_path = os.path.join(PLOTS_DIR, f"{instance.name}_single_run_comparison.png")
+    plt.savefig(save_path)
+    print(f"  [Saved] Comparison plot to: {save_path}")
+    
     plt.show()
 
-# =============================================================================
-#  CORE EXPERIMENT LOGIC
-# =============================================================================
-
-def run_single_experiment(instance, params, use_local_search, max_iters, verbose=True):
-    """
-    Runs a single MMAS experiment with DYNAMIC SCALING.
-    """
-    mode = "Hybrid (VND)" if use_local_search else "Pure MMAS"
-    
-    # --- SCIENTIFIC SCALING: CALCULATE ANTS DYNAMICALLY ---
-    # m = Round(ant_factor * N)
-    n_ants = int(round(instance.n_locations * params['ant_factor']))
-    n_ants = max(10, n_ants) # Safety floor: never less than 10
-    
-    if verbose:
-        print(f"\n>>> Running {mode}...")
-        print(f"    [Config] Ants: {n_ants} (Factor: {params['ant_factor']}), Rho: {params['rho']}, Beta: {params['beta']}")
-    
-    t0 = time.time()
-    
-    solver = MMASSolver(
-        instance, 
-        n_ants=n_ants,          # Passed Dynamic Count
-        rho=params['rho'], 
-        alpha=params['alpha'], 
-        beta=params['beta'], 
-        use_local_search=use_local_search
-    )
-    
-    cost, tour = solver.solve(max_iterations=max_iters, verbose=verbose)
-    elapsed = time.time() - t0
-    
-    return cost, tour, elapsed
-
-def print_results_table(res_pure, res_hybrid):
-    """
-    Calculates statistics and prints the comparison table.
-    """
-    cost_pure, _, time_pure = res_pure
-    cost_hybrid, _, time_hybrid = res_hybrid
-    
+def run_single_mode(instance, filename):
     print("\n" + "="*60)
-    print(" FINAL COMPARISON RESULTS")
-    print("="*60)
-    print(f"{'Metric':<20} | {'Pure MMAS':<15} | {'Hybrid MMAS':<15}")
-    print("-" * 60)
-    print(f"{'Best Cost':<20} | {cost_pure:<15.2f} | {cost_hybrid:<15.2f}")
-    print(f"{'Time (seconds)':<20} | {time_pure:<15.2f} | {time_hybrid:<15.2f}")
-    
-    cost_imp = cost_pure - cost_hybrid
-    cost_imp_pct = (cost_imp / cost_pure) * 100 if cost_pure > 0 else 0
-    
-    if time_pure > 0:
-        time_penalty = time_hybrid / time_pure
-    else:
-        time_penalty = 0
-
-    print("-" * 60)
-    print(f"Cost Improvement:    {cost_imp:.2f} ({cost_imp_pct:.2f}%)")
-    print(f"Time Factor:         Hybrid is {time_penalty:.1f}x slower")
+    print(f" [SINGLE MODE] Visualizing 1 Run for: {filename}")
     print("="*60)
 
-# =============================================================================
-#  WRAPPER & MAIN
-# =============================================================================
+    # 1. Standard Run
+    print("Running Standard MMAS...")
+    c1, t1, _, tour1 = run_trial_unified(instance, PARAMS_STANDARD, False, MAX_ITERS_STD)
 
-def run_full_comparison_for_file(filename, max_iters=200):
-    """
-    Executes the full comparison pipeline using distinct, scientifically tuned parameters.
-    """
-    # 1. Load Data
-    try:
-        if not os.path.exists(filename):
-            print(f"[Error] File not found: {filename}")
-            return
-        instance = CVRPInstance(filename)
-    except Exception as e:
-        print(f"[Error] Could not load {filename}: {e}")
-        return
+    # 2. Hybrid Run
+    print("Running Hybrid MMAS...")
+    c2, t2, _, tour2 = run_trial_unified(instance, PARAMS_HYBRID, True, MAX_ITERS_HYB)
 
-    print("\n" + "="*60)
-    print(f" EXPERIMENT: {instance.name} (N={instance.n_locations})")
-    print("="*60)
-
-    # 2. Run Experiment A: Pure MMAS (Using Standard Parameters)
-    results_pure = run_single_experiment(
-        instance, 
-        PARAMS_STANDARD,      # <--- Uses Low Rho, High Beta
-        use_local_search=False, 
-        max_iters=max_iters
-    )
-
-    # 3. Run Experiment B: Hybrid MMAS (Using Hybrid Parameters)
-    results_hybrid = run_single_experiment(
-        instance, 
-        PARAMS_HYBRID,        # <--- Uses High Rho, Low Beta
-        use_local_search=True, 
-        max_iters=max_iters
-    )
-
-    # 4. Report & Visualize
-    print_results_table(results_pure, results_hybrid)
+    # 3. Print Stats
+    print("\n" + "-"*50)
+    print(f"{'Metric':<15} | {'Standard':<12} | {'Hybrid':<12}")
+    print("-" * 50)
+    print(f"{'Cost':<15} | {c1:<12.2f} | {c2:<12.2f}")
+    print(f"{'Time (s)':<15} | {t1:<12.2f} | {t2:<12.2f}")
     
-    print(f"Generating Comparison Plot for {filename}...")
+    if t1 > 0:
+        print(f"Time Factor:     Hybrid is {t2/t1:.1f}x slower")
+    if c1 > 0:
+        imp = ((c1 - c2) / c1) * 100
+        print(f"Improvement:     {imp:.2f}%")
+    print("-" * 50)
+
+    # 4. Plot
+    print("Opening Comparison Plot...")
     plot_comparison(
         instance, 
-        results_pure[1], results_pure[0], "Pure MMAS\n(Standard Physics)", 
-        results_hybrid[1], results_hybrid[0], "Hybrid MMAS\n(Lamarckian Physics)"
+        tour1, c1, "Standard MMAS", 
+        tour2, c2, "Hybrid MMAS"
     )
 
-def main():
-    # --- FINAL TEST SUITE ---
-    
-    # 1. Random Topology (Validation)
-    run_full_comparison_for_file("./datasets/CMT1.vrp", max_iters=200)
+# =============================================================================
+#  MODE 2: SCIENTIFIC STATISTICAL MODE
+# =============================================================================
 
-    # 2. Clustered Topology (Stability Test)
-    run_full_comparison_for_file("./datasets/CMT12.vrp", max_iters=200)
+def plot_convergence_aggregation(ax, history_list, label, color, max_iters):
+    """Aggregates multiple sparse convergence histories into a Mean+StdDev plot."""
+    if not history_list: return
+
+    # 1. Densify (Sparse tuples -> Dense Array)
+    dense_matrix = np.zeros((len(history_list), max_iters))
     
+    for i, trial_data in enumerate(history_list):
+        lookup = dict(trial_data) # Convert [(iter, cost)] to dict
+        current_val = trial_data[0][1] if trial_data else 0
+        
+        for t in range(max_iters):
+            if t in lookup:
+                current_val = lookup[t]
+            dense_matrix[i, t] = current_val
+
+    # 2. Stats
+    mean_curve = np.mean(dense_matrix, axis=0)
+    std_curve = np.std(dense_matrix, axis=0)
+    x_axis = np.arange(max_iters)
+
+    # 3. Plot
+    ax.plot(x_axis, mean_curve, color=color, linewidth=2, label=f"{label} (Mean)")
+    ax.fill_between(x_axis, mean_curve - std_curve, mean_curve + std_curve, color=color, alpha=0.2)
+
+def perform_analysis_plots(df, conv_data, filename):
+    """Generates Boxplot, Scalability, and Convergence plots."""
+    os.makedirs(PLOTS_DIR, exist_ok=True)
+    base_name = filename.replace('.vrp', '')
+
+    # --- 1. Boxplot (Stability) ---
+    plt.figure(figsize=(8, 6))
+    # FIXED: Added hue='Algorithm' and legend=False to silence warning
+    sns.boxplot(x='Algorithm', y='Cost', hue='Algorithm', legend=False, data=df, palette='Set2')
+    plt.title(f'Cost Distribution (N={len(df)//2} runs): {base_name}')
+    plt.grid(True, axis='y', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOTS_DIR, f"{base_name}_boxplot.png"))
+    print(f"  [Saved] {base_name}_boxplot.png")
+    plt.close()
+
+    # --- 2. Time Scatter (Scalability Placeholder) ---
+    plt.figure(figsize=(8, 5))
+    # FIXED: Added hue='Algorithm' and legend=False to silence warning
+    sns.stripplot(x='Algorithm', y='Time', hue='Algorithm', legend=False, data=df, size=8, alpha=0.7, palette='Set1')
+    plt.title(f'Computation Time Variance: {base_name}')
+    plt.ylabel('Time (s)')
+    plt.grid(True, axis='y', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOTS_DIR, f"{base_name}_timeplot.png"))
+    print(f"  [Saved] {base_name}_timeplot.png")
+    plt.close()
+
+    # --- 3. Convergence (Mean + Std) ---
+    plt.figure(figsize=(10, 5))
+    
+    # Plot Standard
+    if 'Standard' in conv_data:
+        plot_convergence_aggregation(plt.gca(), conv_data['Standard'], 'Standard', 'blue', MAX_ITERS_STD)
+    
+    # Plot Hybrid
+    if 'Hybrid' in conv_data:
+        plot_convergence_aggregation(plt.gca(), conv_data['Hybrid'], 'Hybrid', 'red', MAX_ITERS_HYB)
+    
+    # Plot Real BKS
+    real_bks = df['BKS'].iloc[0]
+    if real_bks > 0:
+         plt.axhline(y=real_bks, color='green', linestyle=':', linewidth=2, label=f'BKS ({real_bks:.2f})')
+
+    plt.title(f'Convergence Profile (Mean ± Std Dev): {base_name}')
+    plt.xlabel('Iteration')
+    plt.ylabel('Cost')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOTS_DIR, f"{base_name}_convergence.png"))
+    print(f"  [Saved] {base_name}_convergence.png")
+    plt.close()
+
+def run_scientific_mode(instance, filename, n_trials):
+    print("\n" + "="*60)
+    print(f" [SCIENTIFIC MODE] Running {n_trials} Trials for: {filename}")
+    print("="*60)
+    
+    detailed_data = []
+    convergence_data = {'Standard': [], 'Hybrid': []}
+    
+    # Try to find BKS
+    real_bks = instance.bks if (hasattr(instance, 'bks') and instance.bks) else -1.0
+
+    # --- 1. Run Loop ---
+    # Standard
+    for i in tqdm(range(n_trials), desc="Standard MMAS", ncols=80):
+        c, t, h, _ = run_trial_unified(instance, PARAMS_STANDARD, False, MAX_ITERS_STD)
+        detailed_data.append({
+            'Algorithm': 'Standard', 'Cost': c, 'Time': t, 'BKS': real_bks
+        })
+        convergence_data['Standard'].append(h)
+
+    # Hybrid
+    for i in tqdm(range(n_trials), desc="Hybrid MMAS  ", ncols=80):
+        c, t, h, _ = run_trial_unified(instance, PARAMS_HYBRID, True, MAX_ITERS_HYB)
+        detailed_data.append({
+            'Algorithm': 'Hybrid', 'Cost': c, 'Time': t, 'BKS': real_bks
+        })
+        convergence_data['Hybrid'].append(h)
+
+    # --- 2. Save Data ---
+    df = pd.DataFrame(detailed_data)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    base_name = filename.replace('.vrp', '')
+    
+    df.to_csv(os.path.join(RESULTS_DIR, f"{base_name}_results.csv"), index=False)
+    with open(os.path.join(RESULTS_DIR, f"{base_name}_convergence.json"), "w") as f:
+        json.dump(convergence_data, f)
+        
+    print(f"\n[Data Saved] to '{RESULTS_DIR}' folder")
+
+    # --- 3. Statistical Test (Wilcoxon) ---
+    print("\n[Statistical Analysis]")
+    std_costs = df[df['Algorithm'] == 'Standard']['Cost']
+    hyb_costs = df[df['Algorithm'] == 'Hybrid']['Cost']
+    
+    if len(std_costs) == len(hyb_costs):
+        stat, p = wilcoxon(std_costs, hyb_costs, alternative='greater')
+        print(f"  Wilcoxon Test (Standard > Hybrid?): p-value = {p:.6f}")
+        if p < 0.05:
+            print("  >> RESULT: Hybrid is SIGNIFICANTLY better.")
+        else:
+            print("  >> RESULT: No significant difference.")
+    
+    # --- 4. Generate Plots ---
+    print("\n[Generating Plots]")
+    perform_analysis_plots(df, convergence_data, filename)
+
+
+# =============================================================================
+#  MAIN ENTRY POINT
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="ACO Experiment Runner (Unified)")
+    
+    # Required: Dataset
+    parser.add_argument("--dataset", type=str, required=True, 
+                        help="Name of the VRP file (e.g., CMT1.vrp) inside ./datasets/")
+    
+    # Mode selection
+    parser.add_argument("--mode", type=str, choices=['single', 'scientific'], default='single',
+                        help="'single' = 1 run with Route Plot. 'scientific' = N trials with Stats Plots.")
+    
+    # Optional: Trials (only for scientific mode)
+    parser.add_argument("--trials", type=int, default=20, 
+                        help="Number of trials for scientific mode (default: 20)")
+
+    args = parser.parse_args()
+
+    # Load Instance
+    file_path = os.path.join("./datasets", args.dataset)
+    if not os.path.exists(file_path):
+        print(f"[Error] File not found: {file_path}")
+        return
+    
+    try:
+        instance = CVRPInstance(file_path)
+    except Exception as e:
+        print(f"[Error] Failed to load instance: {e}")
+        return
+
+    # Dispatch
+    if args.mode == 'single':
+        run_single_mode(instance, args.dataset)
+    else:
+        run_scientific_mode(instance, args.dataset, args.trials)
 
 if __name__ == "__main__":
     main()
