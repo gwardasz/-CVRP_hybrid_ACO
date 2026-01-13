@@ -23,25 +23,21 @@ class LocalSearch:
             improvement = False
             
             # --- Operator 1: Relocate (Move customer to different route) ---
-            # [cite: 1390]
             if self._relocate_move(routes):
                 improvement = True
                 continue # Restart VND from top
                 
             # --- Operator 2: Swap (Exchange customers between routes) ---
-            # [cite: 1392]
             if self._swap_move(routes):
                 improvement = True
                 continue # Restart VND from top
                 
             # --- Operator 3: 2-Opt (Intra-route uncrossing) ---
-            # [cite: 1399]
             if self._two_opt_intra(routes):
                 improvement = True
                 continue
                 
             # --- Operator 4: 2-Opt* (Inter-route tail swap) ---
-            # 
             if self._two_opt_star(routes):
                 improvement = True
                 continue
@@ -73,14 +69,13 @@ class LocalSearch:
                 
                 # Try inserting into every other route
                 for r_idx_dst, dst_route in enumerate(routes):
-                    if r_idx_src == r_idx_dst: continue # Simple inter-route only
+                    if r_idx_src == r_idx_dst: continue 
                     
                     # Capacity Check
                     if self._get_route_load(dst_route) + load > self.capacity:
                         continue
                         
                     # Try all positions in dest route
-                    # 0 to len because we can insert at end
                     for j in range(len(dst_route) + 1):
                         gain = self._calc_relocate_gain(src_route, dst_route, i, j)
                         if gain > best_gain:
@@ -103,7 +98,7 @@ class LocalSearch:
         
         # Cost added to Dst
         F = r_dst[j-1] if j > 0 else 0
-        G = r_dst[j] if j < len(r_dst) else 0 # 0 if inserting at end
+        G = r_dst[j] if j < len(r_dst) else 0 
         added = self.dist_matrix[F][B] + self.dist_matrix[B][G] - self.dist_matrix[F][G]
         
         return removed - added
@@ -116,7 +111,7 @@ class LocalSearch:
         move = None
         
         for r1_idx in range(len(routes)):
-            for r2_idx in range(r1_idx + 1, len(routes)): # Avoid duplicates
+            for r2_idx in range(r1_idx + 1, len(routes)):
                 r1 = routes[r1_idx]
                 r2 = routes[r2_idx]
                 
@@ -128,7 +123,7 @@ class LocalSearch:
                         node1 = r1[i]
                         node2 = r2[j]
                         
-                        # Capacity Check: New loads must be valid
+                        # Capacity Check
                         new_load1 = load1 - self.demands[node1] + self.demands[node2]
                         new_load2 = load2 - self.demands[node2] + self.demands[node1]
                         
@@ -142,27 +137,22 @@ class LocalSearch:
                             
         if move:
             r1, r2, i, j = move
-            # Swap
             routes[r1][i], routes[r2][j] = routes[r2][j], routes[r1][i]
             return True
         return False
 
     def _calc_swap_gain(self, r1, r2, i, j):
-        # Neighbors of Node 1
         A = r1[i-1] if i > 0 else 0
         B = r1[i]
         C = r1[i+1] if i < len(r1)-1 else 0
         
-        # Neighbors of Node 2
         U = r2[j-1] if j > 0 else 0
         V = r2[j]
         W = r2[j+1] if j < len(r2)-1 else 0
         
-        # Old Edges Cost
         old_cost = (self.dist_matrix[A][B] + self.dist_matrix[B][C] +
                     self.dist_matrix[U][V] + self.dist_matrix[V][W])
         
-        # New Edges Cost (B is now at V's spot, V is at B's spot)
         new_cost = (self.dist_matrix[A][V] + self.dist_matrix[V][C] +
                     self.dist_matrix[U][B] + self.dist_matrix[B][W])
                     
@@ -172,7 +162,6 @@ class LocalSearch:
     #  OPERATOR 3: 2-OPT (Intra-Route)
     # =========================================================================
     def _two_opt_intra(self, routes):
-        # This is your existing logic, applied to each route
         improvement_found = False
         for route in routes:
             if len(route) < 2: continue
@@ -185,7 +174,6 @@ class LocalSearch:
                     for j in range(i + 1, len(route)):
                         if j - i == 1: continue 
                         
-                        # Check gain
                         A = route[i-1] if i > 0 else 0
                         B = route[i]
                         C = route[j]
@@ -198,19 +186,14 @@ class LocalSearch:
                             route[i:j+1] = route[i:j+1][::-1]
                             improved = True
                             improvement_found = True
+                            break # <--- ADDED BREAK FOR SAFETY & SPEED
+                    if improved: break 
         return improvement_found
 
     # =========================================================================
     #  OPERATOR 4: 2-OPT* (Inter-Route Tail Swap)
     # =========================================================================
     def _two_opt_star(self, routes):
-        """
-        Cuts two routes and swaps their tails.
-        Route 1: Start -> i -> (tail1)
-        Route 2: Start -> j -> (tail2)
-        Result 1: Start -> i -> (tail2)
-        Result 2: Start -> j -> (tail1)
-        """
         best_gain = 0
         move = None
         
@@ -219,25 +202,17 @@ class LocalSearch:
                 r1 = routes[r1_idx]
                 r2 = routes[r2_idx]
                 
-                # Try all break points
-                # i is last node of first part of r1
-                # j is last node of first part of r2
                 for i in range(len(r1)):
                     for j in range(len(r2)):
-                        # Load of HEAD parts
                         load1_head = sum(self.demands[n] for n in r1[:i+1])
                         load2_head = sum(self.demands[n] for n in r2[:j+1])
-                        
-                        # Load of TAIL parts
                         load1_tail = sum(self.demands[n] for n in r1[i+1:])
                         load2_tail = sum(self.demands[n] for n in r2[j+1:])
                         
-                        # Check Swapped Capacities
                         if (load1_head + load2_tail > self.capacity) or \
                            (load2_head + load1_tail > self.capacity):
                             continue
                             
-                        # Calculate Gain
                         A = r1[i]
                         B = r1[i+1] if i < len(r1)-1 else 0
                         C = r2[j]
@@ -257,7 +232,6 @@ class LocalSearch:
             r1 = routes[r1_idx]
             r2 = routes[r2_idx]
             
-            # Create new routes
             new_r1 = r1[:i+1] + r2[j+1:]
             new_r2 = r2[:j+1] + r1[i+1:]
             
@@ -266,7 +240,6 @@ class LocalSearch:
             return True
         return False
 
-    # --- Helpers ---
     def _extract_routes(self, tour):
         routes = []
         curr = []

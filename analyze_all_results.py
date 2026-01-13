@@ -130,9 +130,23 @@ def perform_analysis(df, conv_data):
         data=df, s=100, alpha=0.8
     )
 
-    plt.yscale('log')  # Sets the Y-axis to logarithmic
-    plt.title('Scalability: Execution Time vs Problem Size (Log Scale)')
-    plt.ylabel('Time (s) - Log Scale')
+    label_coords = df.groupby('Instance')[['Size', 'Time']].mean().reset_index()
+    
+    for i, row in label_coords.iterrows():
+        plt.text(
+            x=row['Size'], 
+            y=row['Time'], 
+            s=row['Instance'], 
+            fontsize=9,
+            color='black',
+            ha='right',   # Align text to the right of the point (or 'center')
+            va='bottom',  # Place text slightly above the point
+            #alpha=0.9     # Slight transparency to not block data completely
+        )
+
+    # plt.yscale('log')  # Sets the Y-axis to logarithmic
+    plt.title('Scalability: Execution Time vs Problem Size')
+    plt.ylabel('Time (s)')
     # Use 'both' to show minor grid lines, which helps read log plots
     plt.grid(True, which="both", linestyle='--', alpha=0.5)
 

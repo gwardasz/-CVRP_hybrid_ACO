@@ -86,7 +86,7 @@ class MMASSolver:
                     iterator.set_postfix({"Best Cost": f"{self.best_global_cost:.2f}"})
                 
             # 4. Pheromone Update (MMAS Logic)
-            self._update_pheromones(best_ant_iter)
+            self._update_pheromones(self.best_global_solution, self.best_global_cost)
             
         return self.best_global_cost, self.best_global_solution, history
 
@@ -128,24 +128,23 @@ class MMASSolver:
             self.tau_min = self.tau_max
 
 
-    def _update_pheromones(self, best_ant):
+    def _update_pheromones(self, tour, cost):
         """
-        Applies Evaporation and Elitist Deposit, then Clamps values.
+        Applies Evaporation and Elitist Deposit using the provided solution (Global Best).
         """
         # A. Evaporation: Decrease all pheromones by factor rho
         self.pheromones *= (1.0 - self.rho)
         
-        # B. Elitist Deposit: Only the BEST ant deposits pheromones 
-        # Calculate deposit amount (1 / Cost)
-        deposit = 1.0 / best_ant.total_cost
-        
-        # Walk through the tour and add pheromones to used edges
-        tour = best_ant.tour
-        for i in range(len(tour) - 1):
-            u, v = tour[i], tour[i+1]
-            # Symmetric TSP/VRP: Update both directions
-            self.pheromones[u][v] += deposit
-            self.pheromones[v][u] += deposit
+        # B. Elitist Deposit: Use the specific cost passed in (Global Best)
+        if cost < float('inf') and cost > 0:
+            deposit = 1.0 / cost
+            
+            # Walk through the tour and add pheromones to used edges
+            for i in range(len(tour) - 1):
+                u, v = tour[i], tour[i+1]
+                # Symmetric TSP/VRP: Update both directions
+                self.pheromones[u][v] += deposit
+                self.pheromones[v][u] += deposit
             
         # C. Stagnation Control: Clamp between tau_min and tau_max 
         self.pheromones = np.clip(self.pheromones, self.tau_min, self.tau_max)
